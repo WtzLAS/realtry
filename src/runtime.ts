@@ -22,7 +22,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { computeBackoffDecision } from "./backoff.ts";
 import { classifyAssistantOutcome, type ModelLimits } from "./classifier.ts";
-import type { RealtrySettings } from "./settings.ts";
+import { formatRemainingTimeout, type RealtrySettings } from "./settings.ts";
 import { invokeStreamWithWatchdog } from "./stream-watchdog.ts";
 import { prepareSessionForUnconditionalRetry } from "./tail.ts";
 
@@ -79,6 +79,7 @@ interface InternalAgentSession {
 
 	_extensionRunner?: {
 		getCommand(name: string): { handler?: unknown } | undefined;
+		createContext?(): ExtensionContext;
 	};
 	_isAgentRunActive: boolean;
 	_agentRunAbortRequested: boolean;
@@ -163,18 +164,26 @@ export class RealtryBridge {
 		return controller;
 	}
 
-	controllerForContext(ctx: Pick<ExtensionContext, "sessionManager">): RealtrySessionController | undefined {
+	controllerForContext(
+		ctx: Pick<ExtensionContext, "sessionManager"> & Partial<Pick<ExtensionContext, "hasUI" | "ui">>,
+	): RealtrySessionController | undefined {
 		const session = sessionByManager.get(ctx.sessionManager);
 		if (!session) return undefined;
 		const existing = sessionControllers.get(session);
-		if (existing && existing.bridge === this && !existing.isDisposed()) {
-			return existing;
-		}
-		return this.attachSession(session);
+		const controller =
+			existing && existing.bridge === this && !existing.isDisposed() ? existing : this.attachSession(session);
+		controller.bindUiContext(ctx);
+		return controller;
 	}
 
 	removeController(controller: RealtrySessionController): void {
 		this.controllers.delete(controller);
+	}
+
+	refreshFooters(): void {
+		for (const controller of this.controllers) {
+			controller.syncFooterStatus();
+		}
 	}
 
 	shutdownAll(): void {
@@ -193,6 +202,12 @@ export class RealtrySessionController {
 	private firstFailureAt: number | undefined;
 	private lastError: string | undefined;
 	private totalRetriesInSession = 0;
+	private manualRetryActive = false;
+	private activeStallDeadlineAt: number | undefined;
+	private activeBackoffDeadlineAt: number | undefined;
+	private footerTimer: ReturnType<typeof setInterval> | undefined;
+	private lastPublishedFooter: string | undefined;
+	private boundUi: ExtensionContext["ui"] | undefined;
 	private disposed = false;
 
 	private activeBackoff:
@@ -231,6 +246,100 @@ export class RealtrySessionController {
 			lastError: this.lastError,
 			totalRetriesInSession: this.totalRetriesInSession,
 		};
+	}
+
+	bindUiContext(ctx: Partial<Pick<ExtensionContext, "hasUI" | "ui">>): void {
+		if (ctx.hasUI && ctx.ui && typeof ctx.ui.setStatus === "function") {
+			this.boundUi = ctx.ui;
+		}
+	}
+
+	private resolveUi(): ExtensionContext["ui"] | undefined {
+		if (this.boundUi) return this.boundUi;
+		const internal = this.session as unknown as InternalAgentSession;
+		try {
+			const runnerCtx = internal._extensionRunner?.createContext?.();
+			if (runnerCtx?.hasUI && runnerCtx.ui && typeof runnerCtx.ui.setStatus === "function") {
+				this.boundUi = runnerCtx.ui;
+				return runnerCtx.ui;
+			}
+		} catch {
+			// Context not bound yet (e.g. non-UI print/JSON session)
+		}
+		return undefined;
+	}
+
+	computeFooterStatusText(now = Date.now()): string | undefined {
+		if (this.disposed) return undefined;
+		const settings = this.bridge.getSettings();
+		if (!settings.enabled) return undefined;
+
+		const acting = this.attempt > 0 || this.manualRetryActive;
+		if (!acting) return undefined;
+
+		if (this.firstFailureAt !== undefined) {
+			if (settings.maxRetryDurationMs > 0) {
+				const remainingMs = Math.max(0, settings.maxRetryDurationMs - (now - this.firstFailureAt));
+				return `🔁 ${formatRemainingTimeout(remainingMs)}`;
+			}
+			if (this.activeStallDeadlineAt !== undefined) {
+				return `🔁 ${formatRemainingTimeout(Math.max(0, this.activeStallDeadlineAt - now))}`;
+			}
+			if (this.activeBackoffDeadlineAt !== undefined) {
+				return `🔁 ${formatRemainingTimeout(Math.max(0, this.activeBackoffDeadlineAt - now))}`;
+			}
+			return "🔁 ∞";
+		}
+
+		if (this.activeStallDeadlineAt !== undefined) {
+			return `🔁 ${formatRemainingTimeout(Math.max(0, this.activeStallDeadlineAt - now))}`;
+		}
+		if (settings.maxRetryDurationMs > 0) {
+			return `🔁 ${formatRemainingTimeout(settings.maxRetryDurationMs)}`;
+		}
+		return "🔁 ∞";
+	}
+
+	syncFooterStatus(now = Date.now()): void {
+		const nextText = this.computeFooterStatusText(now);
+		const ui = this.resolveUi();
+
+		if (nextText === undefined) {
+			if (this.footerTimer !== undefined) {
+				clearInterval(this.footerTimer);
+				this.footerTimer = undefined;
+			}
+			if (this.lastPublishedFooter !== undefined) {
+				this.lastPublishedFooter = undefined;
+				try {
+					ui?.setStatus("realtry", undefined);
+				} catch {
+					this.boundUi = undefined;
+				}
+			}
+			return;
+		}
+
+		if (nextText !== this.lastPublishedFooter && ui) {
+			this.lastPublishedFooter = nextText;
+			try {
+				ui.setStatus("realtry", nextText);
+			} catch {
+				this.boundUi = undefined;
+				if (this.footerTimer !== undefined) {
+					clearInterval(this.footerTimer);
+					this.footerTimer = undefined;
+				}
+				return;
+			}
+		}
+
+		if (this.footerTimer === undefined && ui) {
+			this.footerTimer = setInterval(() => {
+				this.syncFooterStatus();
+			}, 1_000);
+			this.footerTimer.unref?.();
+		}
 	}
 
 	rebindHooks(): void {
@@ -305,6 +414,12 @@ export class RealtrySessionController {
 			return invokeStreamWithWatchdog(baseStreamFn, model, context, markedOptions, {
 				stallTimeoutMs: settings.stallTimeoutMs,
 				suppressProviderRetries: true,
+				onDeadlineChange: (deadlineAt) => {
+					this.activeStallDeadlineAt = deadlineAt;
+					if (this.attempt > 0 || this.manualRetryActive) {
+						this.syncFooterStatus();
+					}
+				},
 			});
 		};
 		this.wrappedAgentStreamFn = wrapped;
@@ -342,7 +457,7 @@ export class RealtrySessionController {
 		const settings = this.bridge.getSettings();
 		if (!settings.enabled) return;
 
-		if (this.attempt > 0) {
+		if (this.attempt > 0 || this.manualRetryActive) {
 			const classification = classifyAssistantOutcome(
 				msg as AssistantMessage,
 				settings,
@@ -352,14 +467,26 @@ export class RealtrySessionController {
 				const completedAttempt = this.attempt;
 				this.attempt = 0;
 				this.firstFailureAt = undefined;
-				const internal = this.session as unknown as InternalAgentSession;
-				internal._emit({
-					type: "auto_retry_end",
-					success: true,
-					attempt: completedAttempt,
-				});
+				this.manualRetryActive = false;
+				this.syncFooterStatus();
+				if (completedAttempt > 0) {
+					const internal = this.session as unknown as InternalAgentSession;
+					internal._emit({
+						type: "auto_retry_end",
+						success: true,
+						attempt: completedAttempt,
+					});
+				}
 			}
 		}
+	}
+
+	onAgentEnd(messages: readonly unknown[]): void {
+		if (this.disposed) return;
+		if (this.manualRetryActive && !this.willRetryAfterAgentEnd(messages)) {
+			this.manualRetryActive = false;
+		}
+		this.syncFooterStatus();
 	}
 
 	onFreshUserInput(): void {
@@ -369,6 +496,8 @@ export class RealtrySessionController {
 		}
 		this.attempt = 0;
 		this.firstFailureAt = undefined;
+		this.manualRetryActive = false;
+		this.syncFooterStatus();
 	}
 
 	willRetryAfterAgentEnd(messages: readonly unknown[]): boolean {
@@ -441,6 +570,7 @@ export class RealtrySessionController {
 				this.attempt = nextAttempt;
 				this.totalRetriesInSession++;
 				this.lastError = classification.description;
+				this.syncFooterStatus(now);
 
 				internal._emit({
 					type: "auto_retry_start",
@@ -462,6 +592,7 @@ export class RealtrySessionController {
 					const previousAttempt = this.attempt;
 					this.attempt = 0;
 					this.firstFailureAt = undefined;
+					this.syncFooterStatus();
 					if (previousAttempt > 0) {
 						internal._emit({
 							type: "auto_retry_end",
@@ -479,6 +610,8 @@ export class RealtrySessionController {
 			const exhaustedAttempts = this.attempt;
 			this.attempt = 0;
 			this.firstFailureAt = undefined;
+			this.manualRetryActive = false;
+			this.syncFooterStatus();
 			if (exhaustedAttempts > 0) {
 				internal._emit({
 					type: "auto_retry_end",
@@ -487,18 +620,22 @@ export class RealtrySessionController {
 					finalError: classification.description,
 				});
 			}
-		} else if (this.attempt > 0) {
+		} else if (this.attempt > 0 || this.manualRetryActive) {
 			const finishedAttempt = this.attempt;
 			this.attempt = 0;
 			this.firstFailureAt = undefined;
-			internal._emit({
-				type: "auto_retry_end",
-				success: classification.reason === "ok",
-				attempt: finishedAttempt,
-				...(classification.reason === "ok"
-					? {}
-					: { finalError: message.errorMessage || classification.reason }),
-			});
+			this.manualRetryActive = false;
+			this.syncFooterStatus();
+			if (finishedAttempt > 0) {
+				internal._emit({
+					type: "auto_retry_end",
+					success: classification.reason === "ok",
+					attempt: finishedAttempt,
+					...(classification.reason === "ok"
+						? {}
+						: { finalError: message.errorMessage || classification.reason }),
+				});
+			}
 		}
 
 		// Preserve Pi's native context-overflow & threshold auto-compaction!
@@ -534,6 +671,8 @@ export class RealtrySessionController {
 		if (delayMs <= 0) {
 			return Promise.resolve("ready");
 		}
+		this.activeBackoffDeadlineAt = Date.now() + delayMs;
+		this.syncFooterStatus();
 		return new Promise<BackoffWaitOutcome>((resolve) => {
 			let settled = false;
 			const finish = (outcome: BackoffWaitOutcome) => {
@@ -541,6 +680,8 @@ export class RealtrySessionController {
 				settled = true;
 				clearTimeout(timer);
 				this.activeBackoff = undefined;
+				this.activeBackoffDeadlineAt = undefined;
+				this.syncFooterStatus();
 				resolve(outcome);
 			};
 			const timer = setTimeout(() => finish("ready"), delayMs);
@@ -553,10 +694,12 @@ export class RealtrySessionController {
 	}
 
 	private finishCancelledRetry(): void {
-		if (this.attempt === 0) return;
 		const cancelledAttempt = this.attempt;
 		this.attempt = 0;
 		this.firstFailureAt = undefined;
+		this.manualRetryActive = false;
+		this.syncFooterStatus();
+		if (cancelledAttempt === 0) return;
 		const internal = this.session as unknown as InternalAgentSession;
 		internal._emit({
 			type: "auto_retry_end",
@@ -578,7 +721,9 @@ export class RealtrySessionController {
 		}
 		this.attempt = 0;
 		this.firstFailureAt = undefined;
+		this.manualRetryActive = false;
 		this.lastError = undefined;
+		this.syncFooterStatus();
 	}
 
 	/**
@@ -590,8 +735,11 @@ export class RealtrySessionController {
 	 */
 	async retryNow(ctx: ExtensionCommandContext): Promise<void> {
 		if (this.disposed) return;
+		this.bindUiContext(ctx);
 
 		if (this.activeBackoff) {
+			this.manualRetryActive = true;
+			this.syncFooterStatus();
 			this.activeBackoff.wake();
 			return;
 		}
@@ -649,6 +797,8 @@ export class RealtrySessionController {
 		}
 		internal.refreshContext();
 
+		this.manualRetryActive = true;
+		this.syncFooterStatus();
 		await this.runContinuationLoop(internal);
 	}
 
@@ -712,6 +862,9 @@ export class RealtrySessionController {
 			if (internal._agentRunAbortRequested) {
 				this.finishCancelledRetry();
 			}
+			this.manualRetryActive = false;
+			this.activeStallDeadlineAt = undefined;
+			this.syncFooterStatus();
 			internal._failedResponse = undefined;
 			internal._runSystemPromptOptions = undefined;
 			internal._flushPendingBashMessages();
@@ -724,6 +877,10 @@ export class RealtrySessionController {
 		if (this.disposed) return;
 		this.disposed = true;
 		this.activeBackoff?.cancel();
+		this.manualRetryActive = false;
+		this.activeStallDeadlineAt = undefined;
+		this.activeBackoffDeadlineAt = undefined;
+		this.syncFooterStatus();
 
 		const internal = this.session as unknown as InternalAgentSession;
 		if (this.rawAgentStreamFn && internal.agent.streamFunction === this.wrappedAgentStreamFn) {

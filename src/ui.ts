@@ -106,13 +106,13 @@ export async function showSettingsScreen(
 				{
 					id: "stallTimeout",
 					label: "Stream stall timeout",
-					description: "Abort and retry stalled model streams after inactivity (e.g. 90s, 2m, off).",
+					description: "Abort and retry stalled model streams after inactivity (e.g. 10m, 2m, off).",
 					currentValue: formatDurationMs(s.stallTimeoutMs, "off"),
 					submenu: (_val, closeSubmenu) =>
 						new TextInputSubmenu({
 							theme,
 							label: "Stream stall timeout",
-							help: "Duration such as 90s, 2m, 1500ms, or off / 0 to disable stream stall detection.",
+							help: "Duration such as 10m, 2m, 90s, or off / 0 to disable stream stall detection.",
 							initialValue: formatDurationMs(current().stallTimeoutMs, "off"),
 							apply: (raw) => {
 								const parsed = parseDurationSetting(raw, { allowZero: true });
@@ -136,13 +136,13 @@ export async function showSettingsScreen(
 				{
 					id: "maxRetryDuration",
 					label: "Max retry window",
-					description: "Total time window to keep retrying a failing turn (e.g. 10m, 1h, unlimited).",
+					description: "Total time window to keep retrying a failing turn (e.g. 12h, 1h, unlimited).",
 					currentValue: formatDurationMs(s.maxRetryDurationMs, "unlimited"),
 					submenu: (_val, closeSubmenu) =>
 						new TextInputSubmenu({
 							theme,
 							label: "Max retry window",
-							help: "Duration such as 10m, 30m, 1h, or unlimited / 0 / off to disable the time limit.",
+							help: "Duration such as 12h, 1h, 30m, or unlimited / 0 / off to disable the time limit.",
 							initialValue: formatDurationMs(current().maxRetryDurationMs, "unlimited"),
 							apply: (raw) => {
 								const parsed = parseDurationSetting(raw, { allowZero: true });
@@ -196,7 +196,7 @@ export async function showSettingsScreen(
 				{
 					id: "baseDelay",
 					label: "Base backoff delay",
-					description: "Initial backoff delay for retry attempt 1 (e.g. 2s, 500ms).",
+					description: "Initial backoff delay for retry attempt 1 (e.g. 1s, 500ms).",
 					currentValue: formatDurationMs(s.baseDelayMs, "0ms"),
 					submenu: (_val, closeSubmenu) =>
 						new TextInputSubmenu({
@@ -228,7 +228,7 @@ export async function showSettingsScreen(
 				{
 					id: "maxDelay",
 					label: "Max backoff delay",
-					description: "Upper bound on single-attempt exponential backoff delay (e.g. 60s, 2m).",
+					description: "Upper bound on single-attempt exponential backoff delay (e.g. 30s, 60s).",
 					currentValue: formatDurationMs(s.maxDelayMs, "0ms"),
 					submenu: (_val, closeSubmenu) =>
 						new TextInputSubmenu({

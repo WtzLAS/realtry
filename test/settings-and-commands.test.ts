@@ -8,6 +8,7 @@ import realtry, {
 	DEFAULT_SETTINGS,
 	formatCountLimit,
 	formatDurationMs,
+	formatRemainingTimeout,
 	loadSettings,
 	parseCountSetting,
 	parseDurationSetting,
@@ -21,6 +22,16 @@ describe("settings persistence and parsing", () => {
 		const file = join(dir, "realtry.json");
 		try {
 			assert.deepEqual(loadSettings(file), DEFAULT_SETTINGS);
+			assert.deepEqual(DEFAULT_SETTINGS, {
+				enabled: true,
+				stallTimeoutMs: 600_000,
+				maxRetryDurationMs: 43_200_000,
+				maxRetries: 0,
+				baseDelayMs: 1_000,
+				maxDelayMs: 30_000,
+				retryEmpty: true,
+				retryIncomplete: true,
+			});
 
 			const updated = saveSettings(
 				{
@@ -68,6 +79,13 @@ describe("settings persistence and parsing", () => {
 		assert.equal(formatDurationMs(600_000, "unlimited"), "10m");
 		assert.equal(formatCountLimit(0), "unlimited");
 		assert.equal(formatCountLimit(5), "5");
+
+		assert.equal(formatRemainingTimeout(43_200_000), "12h00m00s");
+		assert.equal(formatRemainingTimeout(43_198_100), "11h59m59s");
+		assert.equal(formatRemainingTimeout(600_000), "10m00s");
+		assert.equal(formatRemainingTimeout(545_000), "9m05s");
+		assert.equal(formatRemainingTimeout(29_100), "30s");
+		assert.equal(formatRemainingTimeout(0), "0s");
 	});
 });
 

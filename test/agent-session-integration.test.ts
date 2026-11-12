@@ -163,8 +163,16 @@ describe("AgentSession integration with realtry", () => {
 			return responder(idx, context, options);
 		};
 
-		await session.bindExtensions({});
-		return { session, sessionManager, seenContexts, events, getCallCount: () => calls };
+		const statusUpdates: Array<{ key: string; text: string | undefined }> = [];
+		const mockUiContext = {
+			notify() {},
+			setStatus(key: string, text: string | undefined) {
+				statusUpdates.push({ key, text });
+			},
+		} as never;
+
+		await session.bindExtensions({ uiContext: mockUiContext });
+		return { session, sessionManager, seenContexts, events, statusUpdates, getCallCount: () => calls };
 	}
 
 	function assertNoInjectedMessages(sessionManager: SessionManager, seenContexts: Context[]) {
@@ -665,5 +673,42 @@ describe("AgentSession integration with realtry", () => {
 			["user", "assistant"],
 		);
 		assert.match(JSON.stringify(projected[1]), /Recovered after Escape \+ \/retry!/);
+	});
+
+	it("shows 🔁 + remaining timeout in the footer while realtry is acting and clears when settled", async () => {
+		let failOnce = true;
+		const { session, statusUpdates } = await createHarness(
+			{
+				maxRetryDurationMs: 43_200_000,
+				stallTimeoutMs: 600_000,
+				baseDelayMs: 25,
+				maxDelayMs: 50,
+			},
+			() => {
+				if (failOnce) {
+					failOnce = false;
+					return immediateMessageStream(
+						makeReply({ content: [], stopReason: "error", errorMessage: "503 Service Unavailable" }),
+					);
+				}
+				return immediateMessageStream(
+					makeReply({ content: [{ type: "text", text: "Success!" }], stopReason: "stop" }),
+				);
+			},
+		);
+
+		await session.prompt("Test footer during auto retry");
+
+		const realtryStatuses = statusUpdates.filter((s) => s.key === "realtry");
+		assert.ok(realtryStatuses.length >= 2, "Expected active footer status followed by clear");
+		assert.match(realtryStatuses[0]!.text ?? "", /^🔁 1[12]h\d{2}m\d{2}s$/);
+		assert.equal(realtryStatuses.at(-1)!.text, undefined);
+
+		// Also verify footer appears during manual /retry and clears once finished
+		statusUpdates.length = 0;
+		await session.prompt("/retry");
+		const manualStatuses = statusUpdates.filter((s) => s.key === "realtry");
+		assert.ok(manualStatuses.some((s) => s.text?.startsWith("🔁 ")));
+		assert.equal(manualStatuses.at(-1)?.text, undefined);
 	});
 });

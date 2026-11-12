@@ -24,6 +24,8 @@ export interface StreamWatchdogOptions {
 	stallTimeoutMs: number;
 	/** Suppress built-in provider SDK retry loops so realtry owns backoff and Escape cancellation. */
 	suppressProviderRetries?: boolean;
+	/** Notified whenever the live stall deadline moves (`Date.now() + stallTimeoutMs`) or clears (`undefined`). */
+	onDeadlineChange?: (deadlineAt: number | undefined) => void;
 }
 
 function buildStallErrorMessage(
@@ -81,6 +83,7 @@ export function invokeStreamWithWatchdog(
 	const stallTimeoutMs = watchdog.stallTimeoutMs;
 
 	if (stallTimeoutMs <= 0) {
+		watchdog.onDeadlineChange?.(undefined);
 		const patchedOptions: ModelsSimpleStreamOptions = {
 			...options,
 			...(suppressProviderRetries ? { maxRetries: 0 } : {}),
@@ -124,6 +127,7 @@ export function invokeStreamWithWatchdog(
 			clearTimeout(timer);
 			timer = undefined;
 		}
+		watchdog.onDeadlineChange?.(undefined);
 	};
 
 	const finishWithStall = () => {
@@ -144,9 +148,12 @@ export function invokeStreamWithWatchdog(
 
 	const touchActivity = () => {
 		if (settled) return;
-		clearWatchdog();
+		if (timer !== undefined) {
+			clearTimeout(timer);
+		}
 		timer = setTimeout(finishWithStall, stallTimeoutMs);
 		timer.unref?.();
+		watchdog.onDeadlineChange?.(Date.now() + stallTimeoutMs);
 	};
 
 	const onCallerAbort = () => {

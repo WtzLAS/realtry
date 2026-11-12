@@ -24,11 +24,11 @@ export interface RealtrySettings {
 
 export const DEFAULT_SETTINGS: RealtrySettings = {
 	enabled: true,
-	stallTimeoutMs: 90_000,
-	maxRetryDurationMs: 600_000,
+	stallTimeoutMs: 600_000,
+	maxRetryDurationMs: 43_200_000,
 	maxRetries: 0,
-	baseDelayMs: 2_000,
-	maxDelayMs: 60_000,
+	baseDelayMs: 1_000,
+	maxDelayMs: 30_000,
 	retryEmpty: true,
 	retryIncomplete: true,
 };
@@ -191,4 +191,22 @@ export function formatDurationMs(
 
 export function formatCountLimit(count: number): string {
 	return count <= 0 ? "unlimited" : String(count);
+}
+
+/**
+ * Format a remaining countdown in milliseconds as a compact jitter-free string
+ * (`11h59m58s`, `9m58s`, `29s`, `0s`).
+ */
+export function formatRemainingTimeout(ms: number): string {
+	const totalSeconds = Math.max(0, Math.ceil(ms / 1_000));
+	const hours = Math.floor(totalSeconds / 3_600);
+	const minutes = Math.floor((totalSeconds % 3_600) / 60);
+	const seconds = totalSeconds % 60;
+	if (hours > 0) {
+		return `${hours}h${String(minutes).padStart(2, "0")}m${String(seconds).padStart(2, "0")}s`;
+	}
+	if (minutes > 0) {
+		return `${minutes}m${String(seconds).padStart(2, "0")}s`;
+	}
+	return `${seconds}s`;
 }

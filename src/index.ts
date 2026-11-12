@@ -34,11 +34,11 @@ const SETTING_KEYS: readonly {
 	completions?: readonly string[];
 }[] = [
 	{ key: "enabled", description: "Enable or disable realtry (on|off)", completions: ["on", "off"] },
-	{ key: "stallTimeout", description: "Stream inactivity timeout (e.g. 90s, 2m, off)", completions: ["90s", "2m", "5m", "off"] },
-	{ key: "maxRetryDuration", description: "Max retry window per turn (e.g. 10m, 30m, unlimited)", completions: ["10m", "30m", "1h", "unlimited"] },
+	{ key: "stallTimeout", description: "Stream inactivity timeout (e.g. 10m, 2m, off)", completions: ["10m", "5m", "2m", "off"] },
+	{ key: "maxRetryDuration", description: "Max retry window per turn (e.g. 12h, 1h, unlimited)", completions: ["12h", "6h", "1h", "unlimited"] },
 	{ key: "maxRetries", description: "Max retry attempts per turn (e.g. 5, 10, unlimited)", completions: ["unlimited", "5", "10", "20"] },
-	{ key: "baseDelay", description: "Initial backoff delay (e.g. 2s, 500ms)", completions: ["1s", "2s", "5s"] },
-	{ key: "maxDelay", description: "Max single backoff delay (e.g. 60s, 2m)", completions: ["30s", "60s", "2m"] },
+	{ key: "baseDelay", description: "Initial backoff delay (e.g. 1s, 500ms)", completions: ["1s", "2s", "5s"] },
+	{ key: "maxDelay", description: "Max single backoff delay (e.g. 30s, 60s)", completions: ["30s", "60s", "2m"] },
 	{ key: "retryEmpty", description: "Retry empty / thinking-only responses (on|off)", completions: ["on", "off"] },
 	{ key: "retryIncomplete", description: "Retry incomplete responses & truncated tool calls (on|off)", completions: ["on", "off"] },
 	{ key: "defaults", description: "Reset all realtry settings to defaults" },
@@ -249,13 +249,14 @@ export default function realtry(pi: ExtensionAPI): Promise<void> {
 	const startupWarnings: string[] = [];
 	let settings = loadSettings(undefined, (warning) => startupWarnings.push(warning));
 
+	const bridge = new RealtryBridge(() => settings);
+
 	const updateSettings = (next: RealtrySettings): RealtrySettings => {
 		const saved = saveSettings(next);
 		settings = saved;
+		bridge.refreshFooters();
 		return saved;
 	};
-
-	const bridge = new RealtryBridge(() => settings);
 
 	pi.on("session_start", async (_event, ctx) => {
 		bridge.controllerForContext(ctx);
@@ -271,6 +272,10 @@ export default function realtry(pi: ExtensionAPI): Promise<void> {
 
 	pi.on("message_end", async (event, ctx) => {
 		bridge.controllerForContext(ctx)?.onMessageEnd(event.message);
+	});
+
+	pi.on("agent_end", async (event, ctx) => {
+		bridge.controllerForContext(ctx)?.onAgentEnd(event.messages);
 	});
 
 	pi.on("input", async (event, ctx) => {
@@ -401,6 +406,7 @@ export {
 	DEFAULT_SETTINGS,
 	formatCountLimit,
 	formatDurationMs,
+	formatRemainingTimeout,
 	loadSettings,
 	parseBooleanSetting,
 	parseCountSetting,
