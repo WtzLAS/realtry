@@ -1,0 +1,34 @@
+{
+	"name": "realtry",
+	"version": "0.1.0",
+	"description": "Message-free retry extension for Pi: retries network errors, stalled streams, incomplete responses, and empty responses without session pollution, plus unconditional /retry.",
+	"type": "module",
+	"private": true,
+	"engines": {
+		"node": ">=22.19.0"
+	},
+	"pi": {
+		"extensions": [
+			"./src/index.ts"
+		]
+	},
+	"scripts": {
+		"test": "node --test",
+		"typecheck": "tsc --noEmit",
+		"check": "npm run typecheck && npm test"
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-agent-core": "^1.5.2",
+		"@earendil-works/pi-ai": "^1.5.2",
+		"@earendil-works/pi-coding-agent": "^1.5.2",
+		"@earendil-works/pi-tui": "^1.5.2"
+	},
+	"devDependencies": {
+		"@earendil-works/pi-agent-core": "1.5.2",
+		"@earendil-works/pi-ai": "1.5.2",
+		"@earendil-works/pi-coding-agent": "1.5.2",
+		"@earendil-works/pi-tui": "1.5.2",
+		"@types/node": "^22.19.19",
+		"typescript": "^5.9.3"
+	}
+}
